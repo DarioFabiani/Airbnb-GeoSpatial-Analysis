@@ -1,0 +1,266 @@
+---
+title: "Florence_analysis"
+author: "Dario Fabiani"
+date: "7/1/2021"
+output: html_document
+---
+# Introduction
+For the analysis I am going to use the GeoPackage I made and download it from the Python script.
+The Analysis is focused on trying to understand if the variable price is spatial auto-correlated. Then, i am also going to put the 'Price' variable in a model and see if it may be related to some other variables and if i need to use a spatial regression analysis. 
+
+The Variables of the dataset are : **rione**, **neighborhood**, **prop_pop**, **price**, **poi_type_turism**, **poi_type**, **es_vicinato**, **es_mddimensioni**, **es_grdimensioni**. I am going to later explained each of them.
+
+The analysis is made on the "districts" (the Rioni) of each neighborhood. Why this? Well, my question is if there are significant differences in the Rioni itself, that should better account for a spatial dependence.
+
+Firstly, i am going to compute the **Global spatial autocorrelation** then the **Local** one.
+The first step of the analysis is made calculating 3 different types of Spatial weight matrix: two *knns* and a *contiguity-based*. This was necessary since the analysis itself is mainly based on the Spatial weight matrix, due to the consequences it has on the computations.
+
+Then, i am going to check the **Spatial auto-correlation of the variable Price** and plot it. Hence, to estimate the *optimal* OLS model i use a subset selection. Then I am going to test each of the model with the lm.morantest and also with the permutation bootstrap approach.
+Eventually, I am going to check for Spatial Local auto-correlation with a Moran scatterplot.
+
+From the analysis it emerges that the variable **price** is **Spatial autocorrelated**, but the model made to predict it, once i apply the Moran's I test on the OLS residuals, it heavily depends on the Spatial weight matrices, and it does not give any evidence to reject the null hypothesis. The Monte Carlo approach is the best one to actually see that even the only significant observed variable was in the right tail of the distribution, hence not representative.
+The Local analysis is another proof of the lack of significance of Spatial auto-correlation of the spatial units.
+
+# Setting up the data
+```{r setup, include=FALSE}
+#the package needed
+library(spdep)
+library(rgdal)
+library(boot)
+```
+I read the file made on the python notebook
+```{r}
+flo <- readOGR(dsn ="flo_analysis.gpkg" , layer = "rioni" )
+```
+
+```{r,include=FALSE}
+plot(flo)
+names(flo@data)
+str(flo@data)
+head(flo@data)
+tail(flo@data)
+
+```
+We start the analysis calculating the centroids
+```{r}
+coords <- coordinates(flo)
+plot(flo, border="blue") ;points(coords, cex=0.8)
+```
+
+Check for outliers in the variable price
+```{r}
+boxplot(flo$price)
+```
+
+There is an outlier. I have three choices: set it as the median of that neighbourhood, delete the rione it belongs to or set it as a default value still higher than the rest.
+I am going to set it with a value of 200, in this way, in the later Moran Scatterplot it will still be above the average as price and it will still be a variable of interest.
+```{r}
+subset <- flo[flo$neighbourhood == 'Rifredi',]
+head(subset@data)
+flo$price[which.max(flo$price)] <- 200
+```
+# Analysis - Price Spatial auto-correlation
+
+Now, I create three different Spatial Weight Matrices.
+First of all, I need to define the spatial topology, the concept of closeness/neighborhood.
+
+```{r}
+knn1 <- knn2nb(knearneigh(coords,k=1,longlat=T))
+plot(flo, border="grey");plot(knn1, coords, add=TRUE)
+
+contnb <- poly2nb(flo, queen=T) #queen = T means "Common border and corner points of the spatial unit"
+plot(flo, border="grey");plot(contnb, coords, add=TRUE)
+
+knn2 <- knn2nb(knearneigh(coords,k=5,longlat=T))
+plot(flo, border="grey");plot(knn2, coords, add=TRUE)
+```
+
+Now, i can build the spatial weight matrix row-standardized
+```{r}
+sp_w1 <- nb2listw(knn1,style = 'W')
+sp_w2 <- nb2listw(knn2,style = 'W')
+sp_w3 <- nb2listw(contnb,style = 'W')
+```
+I apply the Moran's I test to the variable of interest, **Price**, to assess if the Null Hypothesis of *No spatial autocorrelation can be rejected*.
+Before doing that, I can plot the quantile distribution which may suggest the presence of Spatial autocorrelation.
+```{r}
+brks <- round(quantile(flo$price), digits=3)
+colours <- grey((length(brks):2)/length(brks))
+plot(flo, col=colours[findInterval(flo$price, brks, all.inside=TRUE)]);title(main="Median price for each Rione")
+```
+
+Then, I test the variable price to see if it is spatially auto-correlated. I am going to do that with each of the Spatial weight matrices I computed. I am testing them under the assumption of normality, randomization and with the Monte Carlo test.
+```{r}
+moran.test(flo$price, sp_w1, randomisation=F) #p-value high
+moran.test(flo$price, sp_w1, randomisation=T) #p-value high
+moran.mc(flo$price, sp_w1, nsim=999) #p-value high
+```
+```{r}
+moran.test(flo$price, sp_w2, randomisation=F) #p-value low
+moran.test(flo$price, sp_w2, randomisation=T) #p-value low
+moran.mc(flo$price, sp_w2, nsim=999) #p-value low
+```
+```{r}
+moran.test(flo$price, sp_w3, randomisation=F) #p-value low
+moran.test(flo$price, sp_w3, randomisation=T) #p-value low
+moran.mc(flo$price, sp_w3, nsim=999) #p-value low
+```
+The best results are given by the second Spatial weigh matrix, the one with a knn of 5.
+# Analysis- Global Spatial autocorrelation
+
+Next step is to apply the Moran's I test in OLS residuals. But before doing that i am going to apply a best subset Selection on these variables:
+prop_pop = proportion of population in each *Neighborhood* (not for each Rione)
+poi_type_turism = amount of Touristic Point of Interests in each Rione
+es_vicinato = Esercizi commerciali di vicinato
+es_meddimensioni = Esercizi Commerciali di media dimensioni
+es_grdimensioni = Esercizi Commerciali di grandi dimensioni
+
+```{r}
+library(leaps)
+regfit.full = regsubsets(price ~ prop_pop + poi_type_turism +
+                    es_vicinato + es_mddimensioni + es_grdimensioni,flo)
+summary(regfit.full)
+```
+The Best subset selection finds that the best one-variable contains only 'prop_pop', while the best two-variable model contains 'poi_type_turism' and 'es_mddimensioni' and lastly the third model see a combination of the previous ones. 
+Hence i am going to test each of these three models.
+
+Now, i can use the Moran's I test of spatial auto-correlation in each of the OLS residuals. I use the Moran's I test since it is a diagnostic tool to detect the presence of spatial auto-correlation in the residuals of a linear regression model.
+```{r}
+lm_price_1 <- lm(price ~ prop_pop , flo)
+lm_price_2 <- lm(price ~  poi_type_turism + es_mddimensioni, flo)
+lm_price_3 <- lm(price ~ prop_pop + poi_type_turism + es_mddimensioni, flo)
+summary(lm_price_1)
+summary(lm_price_2)
+summary(lm_price_3)
+```
+The summaries shows that the Adj R-squared is very low and that the model with most variables is the one that behave better. This may mean that the variables chosen are not the right ones and adding more variables increase the Adj R-squared but not significantly. Yet, also the F-statistic is too low to reject the null hyp.
+
+The OLS estimated are not really accurate, but let's check with the Moran'I test each of them.
+```{r}
+studres_1 <- rstudent(lm_price_1)#here we compute the student residuals (can be also standardized, raw-residuals)
+studres_2 <- rstudent(lm_price_2)
+studres_3 <- rstudent(lm_price_3)
+
+resdistr <- quantile(studres_1) 
+colours <- grey((length(resdistr):2)/length(resdistr))
+plot(flo, col=colours[findInterval(studres_1, resdistr, all.inside=TRUE)])
+
+```
+```{r}
+lm.morantest(lm_price_1,sp_w1,resfun=rstudent) #high p-value
+lm.morantest(lm_price_1,sp_w2,resfun=rstudent) #low p-value and Observed Moran I slightly above 0
+lm.morantest(lm_price_1,sp_w3,resfun=rstudent) #high p-value
+lm.morantest(lm_price_2,sp_w1,resfun=rstudent) #high p-value
+lm.morantest(lm_price_2,sp_w2,resfun=rstudent) #p-value slightly above the 5% and Observed Moran I slightly above 0
+lm.morantest(lm_price_2,sp_w3,resfun=rstudent) #high p-Value
+lm.morantest(lm_price_3,sp_w1,resfun=rstudent) #high p-value
+lm.morantest(lm_price_3,sp_w2,resfun=rstudent) #Moran's I close to 0 and p-value slightly above 5%
+lm.morantest(lm_price_3,sp_w3,resfun=rstudent) #high p-value
+
+```
+From the previous results we see that the Moran's I test is clearly determinated by the spatial weight matrix I have applied. 
+When I applied the Spatial weight matrix computed with 5 knn the p-value was significant in the lm_price_1 model, but with an Observed Moran's I not even above 0.1, and the rest of the model were around a 5%.
+
+However,let's try to apply the test under permutation bootstrap, and see if the Normality assumption is to strict.
+I am doing it only for the model that best behaved previously, the lm_price_2 with the spatial weight matrix sp_w2
+
+```{r}
+lm_price.lmx <- lm(price ~  poi_type_turism +es_mddimensioni , flo, x=TRUE)
+MoraneI.boot <- function(var, i, ...) {
+  var <- var[i]
+  lmres <- lm(var ~ lm_price.lmx$x - 1)
+  return(moran(x=residuals(lmres), ...)$I)	  
+}
+
+
+boot1 <- boot(residuals(lm_price.lmx),statistic=MoraneI.boot,  
+              R=9999, sim="permutation", listw=sp_w2,  
+              n=length(sp_w2$neighbours), S0=Szero(sp_w2))
+ti <- (boot1$t0 - mean(boot1$t))/sqrt(var(boot1$t))  
+boot1
+plot(boot1)
+```
+
+Hence, given the above permutation bootstrap and given the critical role of the spatial weight matrices on the results I can state that there are not have enough evidence to reject the Null Hyp of *No spatial auto-correlation*.
+
+
+# Analysis- Local Spatial autocorrelation
+Let's now investigate the Local spatial auto-correlation using the Moran's I Scatterplot
+```{r}
+mplot <- moran.plot(flo$price, listw=sp_w1, main="Moran scatterplot", 
+                    return_df=F)
+
+hotspot <- as.numeric(row.names(as.data.frame(summary(mplot))))
+
+flo$wx <- lag.listw(sp_w1, flo$price)
+
+flo$quadrant <- rep("None", length(flo$price))
+for(i in 1:length(hotspot))  {
+  if (flo$price[hotspot[i]]>mean(flo$price) & flo$wx[hotspot[i]]> mean(flo$wx)) 
+    flo$quadrant[hotspot[i]] <- "HH" 
+  if (flo$price[hotspot[i]]>mean(flo$price) & flo$wx[hotspot[i]]< mean(flo$wx)) 
+    flo$quadrant[hotspot[i]] <- "HL" 
+  if (flo$price[hotspot[i]]<mean(flo$price) & flo$wx[hotspot[i]]<mean(flo$wx)) 
+    flo$quadrant[hotspot[i]] <- "LL" 
+  if (flo$price[hotspot[i]]<mean(flo$price) & flo$wx[hotspot[i]]>mean(flo$wx)) 
+    flo$quadrant[hotspot[i]] <- "LH" 
+}
+table(flo$quadrant)
+```
+The marked points are the points that influence more the slope of this regression line. The slope is quite low, as expected from the previous global analysis.
+
+Let's try to map regions with noteworthy influence coded by their quadrant in the Moran scatterplot. In this way, we can identify the regions that have contributed more to the form of spatial auto-correlation.
+```{r}
+flo$colours[flo$quadrant=="None"] <- "white" 
+flo$colours[flo$quadrant=="HH"] <- "black" 
+flo$colours[flo$quadrant=="LL"] <- gray(0.9) 
+flo$colours[flo$quadrant=="LH"] <- gray(0.4)
+flo$colours[flo$quadrant=="HL"] <- gray(0.7)
+plot(flo, col=flo$colours);legend(x=-10, y=73, legend=c("None", "Low-Low", "High-Low", "Low-High", "High-High"),
+       fill=c("white", gray(0.9), gray(0.7), gray(0.4),
+              "black"), bty="n", cex=0.8);title(main="Rioni with influence")
+
+
+###
+lmI <- localmoran(flo$price,sp_w1)
+head(lmI)
+
+brks <- sort(as.numeric(lmI[,1]))
+colours <- grey((0:length(lmI[,1]))/length(lmI[,1]))
+plot(flo, col=colours[findInterval(lmI[,1], brks, all.inside=TRUE)]);title(main="Local Moran's I values")
+```
+
+This plot may suggest that there are some local clusters, but to assess the significance of the revealed pattern I need to use the *Local Moran's Index*.
+
+What I expect from the following plot? 
+
+Well, since the Local Moran’s I is a local measure of spatial auto-correlation, that I computed for each single spatial unit and that it is the composition of the global Moran’s I across all the spatial units. If we compute the average of all the values of the Local Moran’s I across all the spatial units, I obtain the global Moran’s I.
+
+Hence, given that the global Moran'I was almost 0, I expect that most of the spatial units will be blank.
+```{r}
+pval <- as.numeric(lmI[,5])
+flo$colpval[pval>0.05] <- "white" 
+flo$colpval[pval<=0.05 & pval>0.01] <- gray(0.9) 
+flo$colpval[pval<=0.01 & pval>0.001] <- gray(0.7)
+flo$colpval[pval<=0.001 & pval>0.0001] <- gray(0.4)
+flo$colpval[pval<=0.0001] <- "black"
+
+plot(flo, col=flo$colpval);legend(x=-10, y=73, 
+                                  legend=c("Not significant",
+                                           "p-value = 0.05", "p-value = 0.01", "p-value = 0.001",
+                                           "p-value = 0.0001"), fill=c("white", gray(0.9), gray(0.7),
+                                                                       gray(0.4), "black"), bty="n",
+                                  cex=0.8);title(main="Local Moran's I significance map")
+```
+
+As expected most of them are blank, only two seems to form a significant spatial cluster.
+
+# Results
+
+From the analysis it emerges that the variable price is Spatial auto-correlated, but once i apply the Moran's I test on the OLS residuals of the model, it heavily depends on the Spatial weight matrices, and it does not give any evidence to reject the null hypothesis. 
+
+There is no robustness on the output, given that, varying the Spatial weight matrix have a huge impact on the results.
+
+The Monte Carlo approach is the best one to actually see that even the only significant observed variable was in the right tail of the distribution, hence not representative.
+
+The Local analysis is another proof of the lack of significance of Spatial auto-correlation of the spatial units.
